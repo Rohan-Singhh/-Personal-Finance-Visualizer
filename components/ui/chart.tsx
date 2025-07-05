@@ -34,11 +34,42 @@ function useChart() {
   return context;
 }
 
+// Improve the toSafeReactNode helper to handle more cases
+const toSafeReactNode = (value: unknown): React.ReactNode => {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === 'bigint') {
+    return value.toString();
+  }
+  if (typeof value === 'object' && !React.isValidElement(value)) {
+    return String(value);
+  }
+  return value as React.ReactNode;
+};
+
+// Add type guard for payload items
+const isValidPayloadItem = (item: unknown): item is TooltipPayload => {
+  if (!item || typeof item !== 'object') return false;
+  const payloadItem = item as Record<string, unknown>;
+  return (
+    ('value' in payloadItem) &&
+    (typeof payloadItem.value === 'string' || typeof payloadItem.value === 'number')
+  );
+};
+
+// Create a properly typed wrapper for ResponsiveContainer
+const SafeResponsiveContainer: React.FC<{
+  width?: string | number;
+  height?: string | number;
+  children?: React.ReactNode;
+}> = ResponsiveContainer as any;
+
 const ChartContainer = React.forwardRef<
   HTMLDivElement,
   React.ComponentProps<'div'> & {
     config: ChartConfig;
-    children: React.ReactNode | ((props: any) => React.ReactNode);
+    children: React.ReactNode;
   }
 >(({ id, className, children, config, ...props }, ref) => {
   const uniqueId = React.useId();
@@ -56,9 +87,9 @@ const ChartContainer = React.forwardRef<
         {...props}
       >
         <ChartStyle id={chartId} config={config} />
-        {ResponsiveContainer({
-          children: typeof children === 'function' ? children({}) : (children ?? null)
-        }) || null}
+        <SafeResponsiveContainer width="100%" height="100%">
+          {children}
+        </SafeResponsiveContainer>
       </div>
     </ChartContext.Provider>
   );
@@ -100,21 +131,33 @@ ${colorConfig
 
 const ChartTooltip = RechartsTooltip;
 
-const ChartTooltipContent = React.forwardRef<
-  HTMLDivElement,
-  React.ComponentProps<typeof ChartTooltip> &
-    React.ComponentProps<'div'> & {
-      hideLabel?: boolean;
-      hideIndicator?: boolean;
-      indicator?: 'line' | 'dot' | 'dashed';
-      nameKey?: string;
-      labelKey?: string;
-    }
->(
+// Add type guard for tooltip payload
+type TooltipPayload = {
+  value: string | number;
+  name?: string;
+  dataKey?: string;
+  payload?: Record<string, any>;
+  color?: string;
+  fill?: string;
+};
+
+type ChartTooltipContentProps = Omit<React.ComponentProps<typeof ChartTooltip>, 'payload' | 'label'> &
+  React.ComponentProps<'div'> & {
+    hideLabel?: boolean;
+    hideIndicator?: boolean;
+    indicator?: 'line' | 'dot' | 'dashed';
+    nameKey?: string;
+    labelKey?: string;
+    payload?: TooltipPayload[];
+    label?: unknown;
+    labelFormatter?: (label: unknown, payload: TooltipPayload[]) => React.ReactNode;
+  };
+
+const ChartTooltipContent = React.forwardRef<HTMLDivElement, ChartTooltipContentProps>(
   (
     {
       active,
-      payload,
+      payload = [],
       className,
       indicator = 'dot',
       hideLabel = false,
@@ -130,9 +173,7 @@ const ChartTooltipContent = React.forwardRef<
     ref
   ) => {
     const { config } = useChart();
-
-    // Type guard for payload
-    const safePayload: Array<any> = Array.isArray(payload) ? payload : [];
+    const safePayload = payload as TooltipPayload[];
 
     const tooltipLabel = React.useMemo(() => {
       if (hideLabel || !safePayload.length) {
@@ -142,12 +183,11 @@ const ChartTooltipContent = React.forwardRef<
       const [item] = safePayload;
       const key = `${labelKey || item.dataKey || item.name || 'value'}`;
       const itemConfig = getPayloadConfigFromPayload(config, item, key);
-      const value =
-        !labelKey && typeof label === 'string'
-          ? config[label as keyof typeof config]?.label || label
-          : itemConfig?.label;
+      const value = !labelKey && label != null
+        ? toSafeReactNode(config[String(label) as keyof typeof config]?.label || label)
+        : toSafeReactNode(itemConfig?.label);
 
-      if (labelFormatter) {
+      if (labelFormatter && typeof labelFormatter === 'function') {
         return (
           <div className={cn('font-medium', labelClassName)}>
             {labelFormatter(value, safePayload)}
@@ -262,19 +302,18 @@ const ChartLegend = RechartsLegend;
 const ChartLegendContent = React.forwardRef<
   HTMLDivElement,
   React.ComponentProps<'div'> & {
-    payload?: any[];
-    verticalAlign?: string;
+    payload?: unknown[];
+    verticalAlign?: 'top' | 'bottom';
     hideIcon?: boolean;
     nameKey?: string;
   }
 >(
   (
-    { className, hideIcon = false, payload, verticalAlign = 'bottom', nameKey },
+    { className, hideIcon = false, payload = [], verticalAlign = 'bottom', nameKey },
     ref
   ) => {
-    // Type guard for payload
-    const safePayload: Array<any> = Array.isArray(payload) ? payload : [];
     const { config } = useChart();
+    const safePayload = (Array.isArray(payload) ? payload : []).filter(isValidPayloadItem);
 
     if (!safePayload.length) {
       return null;
@@ -289,77 +328,64 @@ const ChartLegendContent = React.forwardRef<
           className
         )}
       >
-        {safePayload
-          .filter((item: any) => (typeof item.value === 'string' || typeof item.value === 'number') && typeof item.value !== 'bigint')
-          .map((item: any) => {
-            const key = `${nameKey || item.dataKey || 'value'}`;
-            const itemConfig = getPayloadConfigFromPayload(config, item, key);
-            // Fallback: convert bigint to string if present
-            const safeValue = typeof item.value === 'bigint' ? item.value.toString() : item.value;
-            return (
-              <div
-                key={String(safeValue)}
-                className={cn(
-                  'flex items-center gap-1.5 [&>svg]:h-3 [&>svg]:w-3 [&>svg]:text-muted-foreground'
-                )}
-              >
-                {itemConfig?.icon && !hideIcon ? (
-                  <itemConfig.icon />
-                ) : (
-                  <div
-                    className="h-2 w-2 shrink-0 rounded-[2px]"
-                    style={{
-                      backgroundColor: item.color,
-                    }}
-                  />
-                )}
-                {itemConfig?.label}
-              </div>
-            );
-          })}
+        {safePayload.map((item) => {
+          const key = `${nameKey || item.dataKey || 'value'}`;
+          const itemConfig = getPayloadConfigFromPayload(config, item, key);
+          const safeValue = toSafeReactNode(item.value);
+          
+          return (
+            <div
+              key={String(safeValue)}
+              className={cn(
+                'flex items-center gap-1.5 [&>svg]:h-3 [&>svg]:w-3 [&>svg]:text-muted-foreground'
+              )}
+            >
+              {itemConfig?.icon && !hideIcon ? (
+                <itemConfig.icon />
+              ) : (
+                <div
+                  className="h-2 w-2 shrink-0 rounded-[2px]"
+                  style={{
+                    backgroundColor: item.color,
+                  }}
+                />
+              )}
+              {toSafeReactNode(itemConfig?.label)}
+            </div>
+          );
+        })}
       </div>
     );
   }
 );
 ChartLegendContent.displayName = 'ChartLegend';
 
-// Helper to extract item config from a payload.
+// Update getPayloadConfigFromPayload to be more type-safe
 function getPayloadConfigFromPayload(
   config: ChartConfig,
   payload: unknown,
   key: string
-) {
-  if (typeof payload !== 'object' || payload === null) {
+): ChartConfig[string] | undefined {
+  if (!payload || typeof payload !== 'object') {
     return undefined;
   }
 
-  const payloadPayload =
-    'payload' in payload &&
-    typeof payload.payload === 'object' &&
-    payload.payload !== null
-      ? payload.payload
-      : undefined;
+  const payloadObj = payload as Record<string, unknown>;
+  const payloadPayload = payloadObj.payload as Record<string, unknown> | undefined;
 
-  let configLabelKey: string = key;
+  let configLabelKey = key;
 
-  if (
-    key in payload &&
-    typeof payload[key as keyof typeof payload] === 'string'
-  ) {
-    configLabelKey = payload[key as keyof typeof payload] as string;
+  if (key in payloadObj && typeof payloadObj[key] === 'string') {
+    configLabelKey = payloadObj[key] as string;
   } else if (
     payloadPayload &&
     key in payloadPayload &&
-    typeof payloadPayload[key as keyof typeof payloadPayload] === 'string'
+    typeof payloadPayload[key] === 'string'
   ) {
-    configLabelKey = payloadPayload[
-      key as keyof typeof payloadPayload
-    ] as string;
+    configLabelKey = payloadPayload[key] as string;
   }
 
-  return configLabelKey in config
-    ? config[configLabelKey]
-    : config[key as keyof typeof config];
+  return config[configLabelKey] || config[key];
 }
 
 export {
